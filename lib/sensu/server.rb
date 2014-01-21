@@ -2,6 +2,7 @@ require File.join(File.dirname(__FILE__), 'base')
 require File.join(File.dirname(__FILE__), 'redis')
 require File.join(File.dirname(__FILE__), 'socket')
 require File.join(File.dirname(__FILE__), 'sandbox')
+require File.join(File.dirname(__FILE__), 'transport')
 
 module Sensu
   class Server
@@ -28,6 +29,7 @@ module Sensu
       @master_timers = Array.new
       @handlers_in_progress_count = 0
       @is_master = false
+      @transport = Sensu::Transport.create(base)
     end
 
     def setup_redis
@@ -786,6 +788,7 @@ module Sensu
 
     def bootstrap
       setup_keepalives
+      @transport.setup_keepalives
       setup_results
       setup_master_monitor
       @state = :running
@@ -793,6 +796,7 @@ module Sensu
 
     def start
       setup_redis
+      @transport.setup(@redis) { self }
       setup_rabbitmq
       bootstrap
     end
