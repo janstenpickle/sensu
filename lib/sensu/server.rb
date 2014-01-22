@@ -2,13 +2,13 @@ require File.join(File.dirname(__FILE__), 'base')
 require File.join(File.dirname(__FILE__), 'redis')
 require File.join(File.dirname(__FILE__), 'socket')
 require File.join(File.dirname(__FILE__), 'sandbox')
-require File.join(File.dirname(__FILE__), 'transports')
+require File.join(File.dirname(__FILE__), 'transport')
 
 module Sensu
   class Server
     include Utilities
 
-    attr_reader :is_master
+    attr_reader :is_master, :transport
 
     def self.run(options={})
       server = self.new(options)
@@ -29,8 +29,7 @@ module Sensu
       @master_timers = Array.new
       @handlers_in_progress_count = 0
       @is_master = false
-      base.transports
-      @transport = Transport::Base.create(base, self)
+      @transport = Transport.create(base, self)
     end
 
     def setup_redis
@@ -54,49 +53,7 @@ module Sensu
         @logger.info('reconnected to redis')
         resume
       end
-    end
-
-    def setup_rabbitmq
-      @logger.debug('connecting to rabbitmq', {
-        :settings => @settings[:rabbitmq]
-      })
-      @rabbitmq = RabbitMQ.connect(@settings[:rabbitmq])
-      @rabbitmq.on_error do |error|
-        @logger.fatal('rabbitmq connection error', {
-          :error => error.to_s
-        })
-        stop
-      end
-      @rabbitmq.before_reconnect do
-        unless testing?
-          @logger.warn('reconnecting to rabbitmq')
-          pause
-        end
-      end
-      @rabbitmq.after_reconnect do
-        @logger.info('reconnected to rabbitmq')
-        resume
-      end
-      @amq = @rabbitmq.channel
-    end
-
-    def setup_keepalives(&block)
-      @logger.debug('subscribing to keepalives')
-      @keepalive_queue = @amq.queue!('keepalives', :auto_delete => true)
-      @keepalive_queue.bind(@amq.direct('keepalives')) do
-        block.call if block
-      end
-      @keepalive_queue.subscribe(:ack => true) do |header, payload|
-        client = Oj.load(payload)
-        @logger.debug('received keepalive', {
-          :client => client
-        })
-        @redis.set('client:' + client[:name], Oj.dump(client)) do
-          @redis.sadd('clients', client[:name]) do
-            header.ack
-          end
-        end
-      end
+      @transport.redis=@redis
     end
 
     def action_subdued?(condition)
@@ -351,23 +308,8 @@ module Sensu
             rescue => error
               on_error.call(error)
             end
-          when 'amqp'
-            exchange_name = handler[:exchange][:name]
-            exchange_type = handler[:exchange].has_key?(:type) ? handler[:exchange][:type].to_sym : :direct
-            exchange_options = handler[:exchange].reject do |key, value|
-              [:name, :type].include?(key)
-            end
-            unless event_data.empty?
-              begin
-                @amq.method(exchange_type).call(exchange_name, exchange_options).publish(event_data)
-              rescue AMQ::Client::ConnectionClosedError => error
-                @logger.error('failed to publish event data to an exchange', {
-                  :exchange => handler[:exchange],
-                  :payload => event_data,
-                  :error => error.to_s
-                })
-              end
-            end
+          when /amqp|transport/
+            @transport.handle(handler, event_data)
             @handlers_in_progress_count -= 1
           when 'extension'
             handler.safe_run(event_data) do |output, status|
@@ -502,24 +444,6 @@ module Sensu
       end
     end
 
-    def setup_results(&block)
-      @logger.debug('subscribing to results')
-      @result_queue = @amq.queue!('results', :auto_delete => true)
-      @result_queue.bind(@amq.direct('results')) do
-        block.call if block
-      end
-      @result_queue.subscribe(:ack => true) do |header, payload|
-        result = Oj.load(payload)
-        @logger.debug('received result', {
-          :result => result
-        })
-        process_result(result)
-        EM::next_tick do
-          header.ack
-        end
-      end
-    end
-
     def check_request_subdued?(check)
       if check[:subdue] && check[:subdue][:at] == 'publisher'
         action_subdued?(check[:subdue])
@@ -541,15 +465,7 @@ module Sensu
         :subscribers => check[:subscribers]
       })
       check[:subscribers].each do |exchange_name|
-        begin
-          @amq.fanout(exchange_name).publish(Oj.dump(payload))
-        rescue AMQ::Client::ConnectionClosedError => error
-          @logger.error('failed to publish check request', {
-            :exchange_name => exchange_name,
-            :payload => payload,
-            :error => error.to_s
-          })
-        end
+        @transport.publish_check_request(payload)
       end
     end
 
@@ -593,14 +509,7 @@ module Sensu
       @logger.debug('publishing check result', {
         :payload => payload
       })
-      begin
-        @amq.direct('results').publish(Oj.dump(payload))
-      rescue AMQ::Client::ConnectionClosedError => error
-        @logger.error('failed to publish check result', {
-          :payload => payload,
-          :error => error.to_s
-        })
-      end
+      @transport.publish_result(payload)
     end
 
     def determine_stale_clients
@@ -759,22 +668,6 @@ module Sensu
       end
     end
 
-    def unsubscribe
-      @logger.warn('unsubscribing from keepalive and result queues')
-      if @rabbitmq.connected?
-        @keepalive_queue.unsubscribe
-        @result_queue.unsubscribe
-        @amq.recover
-      else
-        @keepalive_queue.before_recovery do
-          @keepalive_queue.unsubscribe
-        end
-        @result_queue.before_recovery do
-          @result_queue.unsubscribe
-        end
-      end
-    end
-
     def complete_handlers_in_progress(&block)
       @logger.info('completing handlers in progress', {
         :handlers_in_progress_count => @handlers_in_progress_count
@@ -788,9 +681,7 @@ module Sensu
     end
 
     def bootstrap
-      setup_keepalives
       @transport.setup_keepalives
-      setup_results
       @transport.setup_results
       setup_master_monitor
       @state = :running
@@ -798,8 +689,7 @@ module Sensu
 
     def start
       setup_redis
-      @transport.setup(@redis)
-      setup_rabbitmq
+      @transport.setup
       bootstrap
     end
 
@@ -810,7 +700,7 @@ module Sensu
           timer.cancel
         end
         @timers.clear
-        unsubscribe
+        @transport.server_unsubscribe
         resign_as_master do
           @state = :paused
           if block
@@ -823,7 +713,7 @@ module Sensu
     def resume
       retry_until_true(1) do
         if @state == :paused
-          if @redis.connected? && @rabbitmq.connected?
+          if @redis.connected? && @transport.connected?
             bootstrap
             true
           end
@@ -838,7 +728,7 @@ module Sensu
         complete_handlers_in_progress do
           @extensions.stop_all do
             @redis.close
-            @rabbitmq.close
+            @transport.close
             @logger.warn('stopping reactor')
             EM::stop_event_loop
           end
@@ -847,7 +737,7 @@ module Sensu
     end
 
     def trap_signals
-      @signals = Array.new
+        @signals = Array.new
       STOP_SIGNALS.each do |signal|
         Signal.trap(signal) do
           @signals << signal

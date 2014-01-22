@@ -8,9 +8,9 @@ describe 'Sensu::Client' do
     @client = Sensu::Client.new(options)
   end
 
-  it 'can connect to rabbitmq' do
+  it 'can connect to transport' do
     async_wrapper do
-      @client.setup_rabbitmq
+      @client.transport.setup
       async_done
     end
   end
@@ -18,7 +18,7 @@ describe 'Sensu::Client' do
   it 'can send a keepalive' do
     async_wrapper do
       keepalive_queue do |queue|
-        @client.setup_rabbitmq
+        @client.transport.setup
         @client.publish_keepalive
         queue.subscribe do |payload|
           keepalive = Oj.load(payload)

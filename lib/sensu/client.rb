@@ -1,11 +1,12 @@
 require File.join(File.dirname(__FILE__), 'base')
 require File.join(File.dirname(__FILE__), 'socket')
+require File.join(File.dirname(__FILE__), 'transport')
 
 module Sensu
   class Client
     include Utilities
 
-    attr_accessor :safe_mode
+    attr_accessor :safe_mode, :transport
 
     def self.run(options={})
       client = self.new(options)
@@ -25,26 +26,7 @@ module Sensu
       @timers = Array.new
       @checks_in_progress = Array.new
       @safe_mode = @settings[:client][:safe_mode] || false
-    end
-
-    def setup_rabbitmq
-      @logger.debug('connecting to rabbitmq', {
-        :settings => @settings[:rabbitmq]
-      })
-      @rabbitmq = RabbitMQ.connect(@settings[:rabbitmq])
-      @rabbitmq.on_error do |error|
-        @logger.fatal('rabbitmq connection error', {
-          :error => error.to_s
-        })
-        stop
-      end
-      @rabbitmq.before_reconnect do
-        @logger.warn('reconnecting to rabbitmq')
-      end
-      @rabbitmq.after_reconnect do
-        @logger.info('reconnected to rabbitmq')
-      end
-      @amq = @rabbitmq.channel
+      @transport = Transport.create(base, self)
     end
 
     def publish_keepalive
@@ -53,21 +35,14 @@ module Sensu
       @logger.debug('publishing keepalive', {
         :payload => payload
       })
-      begin
-        @amq.direct('keepalives').publish(Oj.dump(payload))
-      rescue AMQ::Client::ConnectionClosedError => error
-        @logger.error('failed to publish keepalive', {
-          :payload => payload,
-          :error => error.to_s
-        })
-      end
+      @transport.publish_keepalive(payload)
     end
 
     def setup_keepalives
       @logger.debug('scheduling keepalives')
       publish_keepalive
       @timers << EM::PeriodicTimer.new(20) do
-        if @rabbitmq.connected?
+        if @transport.connected?
           publish_keepalive
         end
       end
@@ -81,14 +56,7 @@ module Sensu
       @logger.info('publishing check result', {
         :payload => payload
       })
-      begin
-        @amq.direct('results').publish(Oj.dump(payload))
-      rescue AMQ::Client::ConnectionClosedError => error
-        @logger.error('failed to publish check result', {
-          :payload => payload,
-          :error => error.to_s
-        })
-      end
+      @transport.publish_result(check)
     end
 
     def substitute_command_tokens(check)
@@ -193,26 +161,6 @@ module Sensu
       end
     end
 
-    def setup_subscriptions
-      @logger.debug('subscribing to client subscriptions')
-      @check_request_queue = @amq.queue('', :auto_delete => true) do |queue|
-        @settings[:client][:subscriptions].each do |exchange_name|
-          @logger.debug('binding queue to exchange', {
-            :queue_name => queue.name,
-            :exchange_name => exchange_name
-          })
-          queue.bind(@amq.fanout(exchange_name))
-        end
-        queue.subscribe do |payload|
-          check = Oj.load(payload)
-          @logger.info('received check request', {
-            :check => check
-          })
-          process_check(check)
-        end
-      end
-    end
-
     def schedule_checks(checks)
       check_count = 0
       stagger = testing? ? 0 : 2
@@ -286,9 +234,9 @@ module Sensu
     end
 
     def start
-      setup_rabbitmq
+      @transport.setup
       setup_keepalives
-      setup_subscriptions
+      @transport.setup_subscriptions
       setup_standalone
       setup_sockets
     end
@@ -298,10 +246,10 @@ module Sensu
       @timers.each do |timer|
         timer.cancel
       end
-      unsubscribe
+      @transport.client_unsubscribe
       complete_checks_in_progress do
         @extensions.stop_all do
-          @rabbitmq.close
+          @transport.close
           @logger.warn('stopping reactor')
           EM::stop_event_loop
         end

@@ -15,9 +15,9 @@ describe 'Sensu::Server' do
     end
   end
 
-  it 'can connect to rabbitmq' do
+  it 'can connect to transport' do
     async_wrapper do
-      @server.setup_rabbitmq
+      @server.transport.setup
       async_done
     end
   end
@@ -25,7 +25,7 @@ describe 'Sensu::Server' do
   it 'can consume client keepalives' do
     async_wrapper do
       @server.setup_redis
-      @server.setup_rabbitmq
+      @server.transport.setup
       @server.setup_keepalives do
         keepalive = client_template
         keepalive[:timestamp] = epoch
@@ -280,11 +280,11 @@ describe 'Sensu::Server' do
     end
   end
 
-  it 'can handle an event with a amqp handler' do
+  it 'can handle an event with a transport handler' do
     async_wrapper do
       @server.setup_rabbitmq
       event = event_template
-      event[:check][:handler] = 'amqp'
+      event[:check][:handler] = 'transport'
       amq.direct('events') do
         queue = amq.queue('', :auto_delete => true).bind('events') do
           @server.handle_event(event)
@@ -379,7 +379,7 @@ describe 'Sensu::Server' do
     async_wrapper do
       @server.setup_rabbitmq
       @server.setup_redis
-      @server.setup_results do
+      @server.transport.setup_results do
         redis.flushdb do
           client = client_template
           redis.set('client:i-424242', Oj.dump(client)) do

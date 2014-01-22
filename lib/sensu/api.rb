@@ -1,5 +1,6 @@
 require File.join(File.dirname(__FILE__), 'base')
 require File.join(File.dirname(__FILE__), 'redis')
+require File.join(File.dirname(__FILE__), 'transport')
 
 gem 'thin', '1.5.0'
 gem 'sinatra', '1.3.5'
@@ -25,6 +26,7 @@ module Sensu
         base = Base.new(options)
         $logger = base.logger
         $settings = base.settings
+        $transport = Transport.create(base, self)
         base.setup_process
         if $settings[:api][:user] && $settings[:api][:password]
           use Rack::Auth::Basic do |user, password|
@@ -52,29 +54,9 @@ module Sensu
         end
       end
 
-      def setup_rabbitmq
-        $logger.debug('connecting to rabbitmq', {
-          :settings => $settings[:rabbitmq]
-        })
-        $rabbitmq = RabbitMQ.connect($settings[:rabbitmq])
-        $rabbitmq.on_error do |error|
-          $logger.fatal('rabbitmq connection error', {
-            :error => error.to_s
-          })
-          stop
-        end
-        $rabbitmq.before_reconnect do
-          $logger.warn('reconnecting to rabbitmq')
-        end
-        $rabbitmq.after_reconnect do
-          $logger.info('reconnected to rabbitmq')
-        end
-        $amq = $rabbitmq.channel
-      end
-
       def start
         setup_redis
-        setup_rabbitmq
+        $transport.setup
         Thin::Logging.silent = true
         bind = $settings[:api][:bind] || '0.0.0.0'
         Thin::Server.start(bind, $settings[:api][:port], self)
@@ -82,7 +64,7 @@ module Sensu
 
       def stop
         $logger.warn('stopping')
-        $rabbitmq.close
+        $transport.close
         $redis.close
         $logger.warn('stopping reactor')
         EM::stop_event_loop
@@ -204,33 +186,6 @@ module Sensu
         end
       end
 
-      def rabbitmq_info(&block)
-        info = {
-          :keepalives => {
-            :messages => nil,
-            :consumers => nil
-          },
-          :results => {
-            :messages => nil,
-            :consumers => nil
-          },
-          :connected => $rabbitmq.connected?
-        }
-        if $rabbitmq.connected?
-          $amq.queue('keepalives', :auto_delete => true).status do |messages, consumers|
-            info[:keepalives][:messages] = messages
-            info[:keepalives][:consumers] = consumers
-            $amq.queue('results', :auto_delete => true).status do |messages, consumers|
-              info[:results][:messages] = messages
-              info[:results][:consumers] = consumers
-              block.call(info)
-            end
-          end
-        else
-          block.call(info)
-        end
-      end
-
       def event_hash(event_json, client_name, check_name)
         Oj.load(event_json).merge(
           :client => client_name,
@@ -253,14 +208,7 @@ module Sensu
         $logger.info('publishing check result', {
           :payload => payload
         })
-        begin
-          $amq.direct('results').publish(Oj.dump(payload))
-        rescue AMQ::Client::ConnectionClosedError => error
-          $logger.error('failed to publish check result', {
-            :payload => payload,
-            :error => error.to_s
-          })
-        end
+        $transport.resolve_event(payload)
       end
     end
 
@@ -270,12 +218,12 @@ module Sensu
     end
 
     aget '/info/?' do
-      rabbitmq_info do |info|
+      $transport.info do |info|
         response = {
           :sensu => {
             :version => VERSION
           },
-          :rabbitmq => info,
+          :transport => info,
           :redis => {
             :connected => $redis.connected?
           }
@@ -285,11 +233,11 @@ module Sensu
     end
 
     aget '/health/?' do
-      if $redis.connected? && $rabbitmq.connected?
+      if $redis.connected? && $transport.connected?
         healthy = Array.new
         min_consumers = integer_parameter(params[:consumers])
         max_messages = integer_parameter(params[:messages])
-        rabbitmq_info do |info|
+        $transport.info do |info|
           if min_consumers
             healthy << (info[:keepalives][:consumers] >= min_consumers)
             healthy << (info[:results][:consumers] >= min_consumers)
