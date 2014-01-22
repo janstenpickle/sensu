@@ -1,13 +1,8 @@
 module Sensu
-  module Transports
-    class RabbitMQ < Sensu::Transport
+  module Transport
+    class RabbitMQ < Sensu::Transport::Base
 
-      def initialize(base)
-        @logger = base.logger
-        @settings = base.settings
-      end
-
-      def setup(redis, &block)
+      def setup(redis)
         self.redis = redis
 
         @logger.debug('connecting to rabbitmq', {
@@ -18,17 +13,17 @@ module Sensu
           @logger.fatal('rabbitmq connection error', {
             :error => error.to_s
           })
-          instance_exec('stop', &block) if block
+          @parent.stop
         end
         @rabbitmq.before_reconnect do
           unless testing?
             @logger.warn('reconnecting to rabbitmq')
-            instance_exec('pause', &block) if block
+            @parent.pause
           end
         end
         @rabbitmq.after_reconnect do
           @logger.info('reconnected to rabbitmq')
-          instance_exec('resume', &block) if block
+          @parent.resume
         end
         @amq = @rabbitmq.channel
       end
@@ -52,6 +47,66 @@ module Sensu
         end
       end
 
+      def setup_results(&block)
+        @logger.debug('subscribing to results')
+        @result_queue = @amq.queue!('results', :auto_delete => true)
+        @result_queue.bind(@amq.direct('results')) do
+          block.call if block
+        end
+        @result_queue.subscribe(:ack => true) do |header, payload|
+          result = Oj.load(payload)
+          @logger.debug('received result', {
+            :result => result
+          })
+          parent.process_result(result)
+          EM::next_tick do
+            header.ack
+          end
+        end
+      end
+
+      def publish_check_request(check)
+        payload = {
+          :name => check[:name],
+          :issued => Time.now.to_i
+        }
+        if check.has_key?(:command)
+          payload[:command] = check[:command]
+        end
+        @logger.info('publishing check request', {
+          :payload => payload,
+          :subscribers => check[:subscribers]
+        })
+        check[:subscribers].each do |exchange_name|
+          begin
+            @amq.fanout(exchange_name).publish(Oj.dump(payload))
+          rescue AMQ::Client::ConnectionClosedError => error
+            @logger.error('failed to publish check request', {
+              :exchange_name => exchange_name,
+              :payload => payload,
+              :error => error.to_s
+            })
+          end
+        end
+      end
+
+      def publish_result(client, check)
+        payload = {
+          :client => client[:name],
+          :check => check
+        }
+        @logger.debug('publishing check result', {
+          :payload => payload
+        })
+        begin
+          @amq.direct('results').publish(Oj.dump(payload))
+        rescue AMQ::Client::ConnectionClosedError => error
+          @logger.error('failed to publish check result', {
+            :payload => payload,
+            :error => error.to_s
+          })
+        end
+      end
 
       def unsubscribe
         @logger.warn('unsubscribing from keepalive and result queues')

@@ -62,6 +62,15 @@ module Sensu
       extensions
     end
 
+    def transports
+      transports = Transports.new
+      if @options[:transport_dir]
+        transports.require_directory(@options[:transport_dir])
+      end
+      transports.load_all
+      transports
+    end
+
     def setup_process
       process = Process.new
       if @options[:daemonize]
