@@ -308,7 +308,7 @@ module Sensu
             rescue => error
               on_error.call(error)
             end
-          when /amqp|transport/
+          when 'amqp'
             @transport.handle(handler, event_data)
             @handlers_in_progress_count -= 1
           when 'extension'
@@ -464,9 +464,7 @@ module Sensu
         :payload => payload,
         :subscribers => check[:subscribers]
       })
-      check[:subscribers].each do |exchange_name|
-        @transport.publish_check_request(payload)
-      end
+      @transport.publish_check_request(*check[:subscribers], payload)
     end
 
     def schedule_checks(checks)

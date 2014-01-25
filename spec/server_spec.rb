@@ -26,7 +26,7 @@ describe 'Sensu::Server' do
     async_wrapper do
       @server.setup_redis
       @server.transport.setup
-      @server.setup_keepalives do
+      @server.transport.setup_keepalives do
         keepalive = client_template
         keepalive[:timestamp] = epoch
         redis.flushdb do
@@ -282,9 +282,9 @@ describe 'Sensu::Server' do
 
   it 'can handle an event with a transport handler' do
     async_wrapper do
-      @server.setup_rabbitmq
+      @server.transport.setup
       event = event_template
-      event[:check][:handler] = 'transport'
+      event[:check][:handler] = 'amqp'
       amq.direct('events') do
         queue = amq.queue('', :auto_delete => true).bind('events') do
           @server.handle_event(event)
@@ -377,7 +377,7 @@ describe 'Sensu::Server' do
 
   it 'can consume results' do
     async_wrapper do
-      @server.setup_rabbitmq
+      @server.transport.setup
       @server.setup_redis
       @server.transport.setup_results do
         redis.flushdb do
@@ -401,7 +401,7 @@ describe 'Sensu::Server' do
 
   it 'can publish check requests' do
     async_wrapper do
-      @server.setup_rabbitmq
+      @server.transport.setup
       amq.fanout('test') do
         check = check_template
         check[:subscribers] = ['test']
@@ -421,7 +421,7 @@ describe 'Sensu::Server' do
 
   it 'can schedule check request publishing' do
     async_wrapper do
-      @server.setup_rabbitmq
+      @server.transport.setup
       @server.setup_publisher
       amq.fanout('test') do
         expected = ['tokens', 'merger', 'sensu_cpu_time']
@@ -440,7 +440,7 @@ describe 'Sensu::Server' do
   it 'can send a check result' do
     async_wrapper do
       result_queue do |queue|
-        @server.setup_rabbitmq
+        @server.transport.setup
         client = client_template
         check = result_template[:check]
         @server.publish_result(client, check)
@@ -457,8 +457,8 @@ describe 'Sensu::Server' do
   it 'can determine stale clients and create the appropriate events' do
     async_wrapper do
       @server.setup_redis
-      @server.setup_rabbitmq
-      @server.setup_results
+      @server.transport.setup
+      @server.transport.setup_results
       client1 = client_template
       client1[:name] = 'foo'
       client1[:timestamp] = epoch - 60
@@ -534,7 +534,7 @@ describe 'Sensu::Server' do
   it 'can be the master and resign' do
     async_wrapper do
       @server.setup_redis
-      @server.setup_rabbitmq
+      @server.transport.setup
       redis.flushdb do
         @server.request_master_election
         timer(1) do
@@ -554,8 +554,8 @@ describe 'Sensu::Server' do
       server2 = @server.clone
       server1.setup_redis
       server2.setup_redis
-      server1.setup_rabbitmq
-      server2.setup_rabbitmq
+      server1.transport.setup
+      server2.transport.setup
       redis.flushdb do
         redis.set('lock:master', epoch - 60) do
           server1.setup_master_monitor

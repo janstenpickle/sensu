@@ -1,6 +1,7 @@
 module Sensu
   module Transports
     class RabbitMQ < Transport
+      include Utilities
 
       def setup()
         @logger.debug('connecting to rabbitmq', {
@@ -60,18 +61,6 @@ module Sensu
           EM::next_tick do
             header.ack
           end
-        end
-      end
-
-      def publish_check_request(payload)
-        begin
-          @amq.fanout(exchange_name).publish(Oj.dump(payload))
-        rescue AMQ::Client::ConnectionClosedError => error
-          @logger.error('failed to publish check request', {
-            :exchange_name => exchange_name,
-            :payload => payload,
-            :error => error.to_s
-          })
         end
       end
 
@@ -207,14 +196,28 @@ consumers|
 
       def resolve_event(payload)
         begin
-          $amq.direct('results').publish(Oj.dump(payload))
+          @amq.direct('results').publish(Oj.dump(payload))
         rescue AMQ::Client::ConnectionClosedError => error
-          $logger.error('failed to publish check result', {
+          @logger.error('failed to publish check result', {
             :payload => payload,
             :error => error.to_s
           })
         end
       end 
+
+      def publish_check_request(*exchanges, payload)
+        exchanges.each do | exchange_name |
+          begin
+            @amq.fanout(exchange_name).publish(Oj.dump(payload))
+          rescue AMQ::Client::ConnectionClosedError => error
+            @logger.error('failed to publish check request', {
+              :exchange_name => exchange_name,
+              :payload => payload,
+              :error => error.to_s
+            })
+          end
+        end
+      end
 
       def connected?
         @rabbitmq.connected?

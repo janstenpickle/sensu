@@ -223,7 +223,7 @@ module Sensu
           :sensu => {
             :version => VERSION
           },
-          :transport => info,
+          :rabbitmq => info,
           :redis => {
             :connected => $redis.connected?
           }
@@ -378,17 +378,7 @@ module Sensu
             :payload => payload,
             :subscribers => subscribers
           })
-          subscribers.uniq.each do |exchange_name|
-            begin
-              $amq.fanout(exchange_name).publish(Oj.dump(payload))
-            rescue AMQ::Client::ConnectionClosedError => error
-              $logger.error('failed to publish check request', {
-                :exchange_name => exchange_name,
-                :payload => payload,
-                :error => error.to_s
-              })
-            end
-          end
+          $transport.publish_check_request(*subscribers.uniq, payload)
           issued!
         else
           not_found!

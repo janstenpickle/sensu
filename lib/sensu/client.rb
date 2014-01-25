@@ -56,7 +56,7 @@ module Sensu
       @logger.info('publishing check result', {
         :payload => payload
       })
-      @transport.publish_result(check)
+      @transport.publish_result(payload)
     end
 
     def substitute_command_tokens(check)
@@ -170,7 +170,7 @@ module Sensu
         @timers << EM::Timer.new(scheduling_delay) do
           interval = testing? ? 0.5 : check[:interval]
           @timers << EM::PeriodicTimer.new(interval) do
-            if @rabbitmq.connected?
+            if @transport.connected?
               check[:issued] = Time.now.to_i
               process_check(check)
             end
@@ -200,19 +200,19 @@ module Sensu
       EM::start_server(options[:bind], options[:port], Socket) do |socket|
         socket.logger = @logger
         socket.settings = @settings
-        socket.amq = @amq
+        socket.transport = @transport
       end
       EM::open_datagram_socket(options[:bind], options[:port], Socket) do |socket|
         socket.logger = @logger
         socket.settings = @settings
-        socket.amq = @amq
+        socket.transport = @transport
         socket.reply = false
       end
     end
 
     def unsubscribe
       @logger.warn('unsubscribing from client subscriptions')
-      if @rabbitmq.connected?
+      if @transport.connected?
         @check_request_queue.unsubscribe
       else
         @check_request_queue.before_recovery do
