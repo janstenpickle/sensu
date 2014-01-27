@@ -149,7 +149,7 @@ exchange_options).publish(event_data)
             @logger.info('received check request', {
               :check => check
             })
-            @parent.process_check(check)
+            @parent.process_check(check) unless @parent.nil?
           end
         end
       end
