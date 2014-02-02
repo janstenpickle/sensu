@@ -130,7 +130,7 @@ describe 'Sensu::Client' do
     async_wrapper do
       result_queue do |queue|
         @client.transport.setup
-        @client.transport.setup_subscriptions
+        @client.setup_subscriptions
         timer(1) do
           amq.fanout('test').publish(Oj.dump(check_template))
         end
@@ -150,7 +150,7 @@ describe 'Sensu::Client' do
       result_queue do |queue|
         @client.safe_mode = true
         @client.transport.setup
-        @client.transport.setup_subscriptions
+        @client.setup_subscriptions
         timer(1) do
           amq.fanout('test').publish(Oj.dump(check_template))
         end

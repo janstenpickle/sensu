@@ -56,6 +56,7 @@ module Sensu
         @on_error.call(error)
       end
       @connection = AMQP.connect(options, {
+        :vhost => '/',
         :on_tcp_connection_failure => on_failure,
         :on_possible_authentication_failure => on_failure
       })

@@ -26,7 +26,7 @@ describe 'Sensu::Server' do
     async_wrapper do
       @server.setup_redis
       @server.transport.setup
-      @server.transport.setup_keepalives do
+      @server.setup_keepalives do
         keepalive = client_template
         keepalive[:timestamp] = epoch
         redis.flushdb do
@@ -379,7 +379,7 @@ describe 'Sensu::Server' do
     async_wrapper do
       @server.transport.setup
       @server.setup_redis
-      @server.transport.setup_results do
+      @server.setup_results do
         redis.flushdb do
           client = client_template
           redis.set('client:i-424242', Oj.dump(client)) do
@@ -458,7 +458,7 @@ describe 'Sensu::Server' do
     async_wrapper do
       @server.setup_redis
       @server.transport.setup
-      @server.transport.setup_results
+      @server.setup_results
       client1 = client_template
       client1[:name] = 'foo'
       client1[:timestamp] = epoch - 60
