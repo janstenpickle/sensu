@@ -35,7 +35,7 @@ module Sensu
       @logger.debug('publishing keepalive', {
         :payload => payload
       })
-      @transport.publish_keepalive(payload)
+      @transport.publish('keepalives', payload)
     end
 
     def setup_keepalives
@@ -56,7 +56,7 @@ module Sensu
       @logger.info('publishing check result', {
         :payload => payload
       })
-      @transport.publish_result(payload)
+      @transport.publish('results', payload)
     end
 
     def substitute_command_tokens(check)
@@ -210,17 +210,6 @@ module Sensu
       end
     end
 
-    def unsubscribe
-      @logger.warn('unsubscribing from client subscriptions')
-      if @transport.connected?
-        @check_request_queue.unsubscribe
-      else
-        @check_request_queue.before_recovery do
-          @check_request_queue.unsubscribe
-        end
-      end
-    end
-
     def complete_checks_in_progress(&block)
       @logger.info('completing checks in progress', {
         :checks_in_progress => @checks_in_progress
@@ -236,9 +225,19 @@ module Sensu
     def start
       @transport.setup
       setup_keepalives
-      @transport.setup_subscriptions
+      setup_subscriptions
       setup_standalone
       setup_sockets
+    end
+
+    def setup_subscriptions
+      @transport.setup_subscriptions(*@settings[:client][:subscriptions]) do | payload |
+        check = Oj.load(payload)
+        @logger.info('received check request', {
+          :check => check
+        })
+        process_check(check)
+      end
     end
 
     def stop
@@ -246,7 +245,7 @@ module Sensu
       @timers.each do |timer|
         timer.cancel
       end
-      @transport.client_unsubscribe
+      @transport.unsubscribe
       complete_checks_in_progress do
         @extensions.stop_all do
           @transport.close

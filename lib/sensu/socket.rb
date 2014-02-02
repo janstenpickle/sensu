@@ -36,7 +36,7 @@ module Sensu
             @logger.info('publishing check result', {
               :payload => payload
             })
-            @transport.publish_result(payload)
+            @transport.publish('results', payload)
             respond('ok')
           else
             @logger.warn('invalid check result', {

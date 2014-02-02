@@ -208,7 +208,7 @@ module Sensu
         $logger.info('publishing check result', {
           :payload => payload
         })
-        $transport.resolve_event(payload)
+        $transport.publish('results', payload)
       end
     end
 
@@ -378,7 +378,7 @@ module Sensu
             :payload => payload,
             :subscribers => subscribers
           })
-          $transport.publish_check_request(*subscribers.uniq, payload)
+          $transport.publish_multi(*subscribers.uniq, payload)
           issued!
         else
           not_found!

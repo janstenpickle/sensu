@@ -45,8 +45,48 @@ module Sensu
       @parent = parent
     end
 
-    def redis=(new_redis)
-      @redis = new_redis
+    def subscribe(&block)
+      throw "This method has not yet been implemented"
+    end
+
+    def bind(&block)
+      throw "This method has not yet been implemented"
+    end
+
+    def setup_results(&block)
+      throw "This method has not yet been implemented"
+    end
+
+    def publish(queue, payload)
+      throw "This method has not yet been implemented"
+    end
+
+    def unsubscribe
+      throw "This method has not yet been implemented"
+    end
+
+    def handle(handler, event_data)
+      throw "This method has not yet been implemented"
+    end
+
+    def setup_subscriptions(*subscriptions, &block)
+      throw "This method has not yet been implemented"
+    end
+
+    def info(&block)
+      throw "This method has not yet been implemented"
+    end
+
+    def publish_multi(*exchanges, payload)
+      throw "This method has not yet been implemented"
+    end
+
+    def connected?
+      throw "This method has not yet been implemented"
+    end
+
+    def close
+      throw "This method has not yet been implemented"
     end
 
     def self.register_transport name

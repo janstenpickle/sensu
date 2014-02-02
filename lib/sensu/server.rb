@@ -53,7 +53,6 @@ module Sensu
         @logger.info('reconnected to redis')
         resume
       end
-      @transport.redis=@redis
     end
 
     def action_subdued?(condition)
@@ -464,7 +463,7 @@ module Sensu
         :payload => payload,
         :subscribers => check[:subscribers]
       })
-      @transport.publish_check_request(*check[:subscribers], payload)
+      @transport.publish_multi(*check[:subscribers], payload)
     end
 
     def schedule_checks(checks)
@@ -507,7 +506,7 @@ module Sensu
       @logger.debug('publishing check result', {
         :payload => payload
       })
-      @transport.publish_result(payload)
+      @transport.publish('results', payload)
     end
 
     def determine_stale_clients
@@ -679,10 +678,39 @@ module Sensu
     end
 
     def bootstrap
-      @transport.setup_keepalives
-      @transport.setup_results
+      setup_keepalives
+      setup_results
       setup_master_monitor
       @state = :running
+    end
+
+    def setup_keepalives(&block)
+      @transport.bind('keepalives', &block)
+      @transport.subscribe('keepalives') do | header, payload |
+        client = Oj.load(payload)
+        @logger.debug('received keepalive', {
+          :client => client
+        })
+        @redis.set('client:' + client[:name], Oj.dump(client)) do
+          @redis.sadd('clients', client[:name]) do
+            header.ack
+          end
+        end
+      end
+    end
+
+    def setup_results(&block)
+      @transport.bind('results', &block)
+      @transport.subscribe('results') do |header, payload|
+        result = Oj.load(payload)
+        @logger.debug('received result', {
+          :result => result
+        })
+        process_result(result)
+        EM::next_tick do
+          header.ack
+        end
+      end
     end
 
     def start
@@ -698,7 +726,7 @@ module Sensu
           timer.cancel
         end
         @timers.clear
-        @transport.server_unsubscribe
+        @transport.unsubscribe
         resign_as_master do
           @state = :paused
           if block

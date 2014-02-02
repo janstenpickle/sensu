@@ -25,77 +25,43 @@ module Sensu
           @parent.resume if @parent.method_defined?(:resume)
         end
         @amq = @rabbitmq.channel
+        @subscribed_queues = {}
       end
 
-      def setup_keepalives(&block)
-        @logger.debug('subscribing to keepalives')
-        @keepalive_queue = @amq.queue!('keepalives', :auto_delete => true)
-        @keepalive_queue.bind(@amq.direct('keepalives')) do
-          block.call if block
+      def bind(queue, &block)
+        @subscribed_queues[queue] = @amq.queue!(queue, :auto_delete => true)
+        @subscribed_queues[queue].bind(@amq.direct(queue)) do
+          block.call(@subscribed_queues[queue]) unless block.nil?
         end
-        @keepalive_queue.subscribe(:ack => true) do |header, payload|
-          client = Oj.load(payload)
-          @logger.debug('received keepalive', {
-            :client => client
-          })
-          @redis.set('client:' + client[:name], Oj.dump(client)) do
-            @redis.sadd('clients', client[:name]) do
-              header.ack
+      end
+
+      def subscribe(queue, &block)
+        @subscribed_queues[queue].subscribe(:ack => true) do |header, payload|
+          block.call(header, payload)
+        end
+      end
+
+      def unsubscribe
+        @logger.warn('unsubscribing from queues')
+        if @rabbitmq.connected?
+          @subscribed_queues.each do | _, queue |
+            queue.unsubscribe
+          end
+          @amq.recover
+        else
+          @subscribed_queues.each do | _, queue |
+            queue.before_recovery do
+              queue.unsubscribe
             end
           end
         end
       end
 
-      def setup_results(&block)
-        @logger.debug('subscribing to results')
-        @result_queue = @amq.queue!('results', :auto_delete => true)
-        @result_queue.bind(@amq.direct('results')) do
-          block.call if block
-        end
-        @result_queue.subscribe(:ack => true) do |header, payload|
-          result = Oj.load(payload)
-          @logger.debug('received result', {
-            :result => result
-          })
-          @parent.process_result(result)
-          EM::next_tick do
-            header.ack
-          end
-        end
-      end
-
-      def publish_result(payload)
+      def publish(queue, payload)
         begin
-          @amq.direct('results').publish(Oj.dump(payload))
+          @amq.direct(queue).publish(Oj.dump(payload))
         rescue AMQ::Client::ConnectionClosedError => error
-          @logger.error('failed to publish check result', {
-            :payload => payload,
-            :error => error.to_s
-          })
-        end
-      end
-
-      def server_unsubscribe
-        @logger.warn('unsubscribing from keepalive and result queues')
-        if @rabbitmq.connected?
-          @keepalive_queue.unsubscribe
-          @result_queue.unsubscribe
-          @amq.recover
-        else
-          @keepalive_queue.before_recovery do
-            @keepalive_queue.unsubscribe
-          end
-          @result_queue.before_recovery do
-            @result_queue.unsubscribe
-          end
-        end
-      end
-
-      def publish_keepalive(payload)
-        begin
-         @amq.direct('keepalives').publish(Oj.dump(payload))
-        rescue AMQ::Client::ConnectionClosedError => error
-          @logger.error('failed to publish keepalive', {
+          @logger.error("failed to publish to #{queue} queue", {
             :payload => payload,
             :error => error.to_s
           })
@@ -104,15 +70,13 @@ module Sensu
 
       def handle(handler, event_data)
         exchange_name = handler[:exchange][:name]
-        exchange_type = handler[:exchange].has_key?(:type) ?
-handler[:exchange][:type].to_sym : :direct
+        exchange_type = handler[:exchange].has_key?(:type) ? handler[:exchange][:type].to_sym : :direct
         exchange_options = handler[:exchange].reject do |key, value|
           [:name, :type].include?(key)
         end
         unless event_data.empty?
           begin
-            @amq.method(exchange_type).call(exchange_name,
-exchange_options).publish(event_data)
+            @amq.method(exchange_type).call(exchange_name, exchange_options).publish(event_data)
           rescue AMQ::Client::ConnectionClosedError => error
             @logger.error('failed to publish event data to an exchange', {
               :exchange => handler[:exchange],
@@ -123,21 +87,10 @@ exchange_options).publish(event_data)
          end
       end
 
-      def publish_result(payload)
-        begin
-          @amq.direct('results').publish(Oj.dump(payload))
-        rescue AMQ::Client::ConnectionClosedError => error
-          @logger.error('failed to publish check result', {
-            :payload => payload,
-            :error => error.to_s
-          })
-        end
-      end
-
-      def setup_subscriptions
+      def setup_subscriptions(*subscriptions, &block)
         @logger.debug('subscribing to client subscriptions')
-        @check_request_queue = @amq.queue('', :auto_delete => true) do |queue|
-          @settings[:client][:subscriptions].each do |exchange_name|
+        @subscribed_queues['check_request'] = @amq.queue('', :auto_delete => true) do |queue|
+          subscriptions.each do |exchange_name|
             @logger.debug('binding queue to exchange', {
               :queue_name => queue.name,
               :exchange_name => exchange_name
@@ -145,22 +98,7 @@ exchange_options).publish(event_data)
             queue.bind(@amq.fanout(exchange_name))
           end
           queue.subscribe do |payload|
-            check = Oj.load(payload)
-            @logger.info('received check request', {
-              :check => check
-            })
-            @parent.process_check(check) unless @parent.nil?
-          end
-        end
-      end
-
-      def client_unsubscribe
-        @logger.warn('unsubscribing from client subscriptions')
-         if @rabbitmq.connected?
-          @check_request_queue.unsubscribe
-         else
-          @check_request_queue.before_recovery do
-            @check_request_queue.unsubscribe
+            block.call(payload)
           end
         end
       end
@@ -178,12 +116,10 @@ exchange_options).publish(event_data)
           :connected => @rabbitmq.connected?
         }
         if @rabbitmq.connected?
-          @amq.queue('keepalives', :auto_delete => true).status do |messages,
-consumers|
+          @amq.queue('keepalives', :auto_delete => true).status do |messages, consumers|
             info[:keepalives][:messages] = messages
             info[:keepalives][:consumers] = consumers
-            @amq.queue('results', :auto_delete => true).status do |messages,
-consumers|
+            @amq.queue('results', :auto_delete => true).status do |messages, consumers|
               info[:results][:messages] = messages
               info[:results][:consumers] = consumers
               block.call(info)
@@ -194,18 +130,7 @@ consumers|
         end
       end
 
-      def resolve_event(payload)
-        begin
-          @amq.direct('results').publish(Oj.dump(payload))
-        rescue AMQ::Client::ConnectionClosedError => error
-          @logger.error('failed to publish check result', {
-            :payload => payload,
-            :error => error.to_s
-          })
-        end
-      end 
-
-      def publish_check_request(*exchanges, payload)
+      def publish_multi(*exchanges, payload)
         exchanges.each do | exchange_name |
           begin
             @amq.fanout(exchange_name).publish(Oj.dump(payload))
